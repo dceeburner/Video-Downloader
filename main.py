@@ -11,7 +11,7 @@ import yt_dlp
 app = FastAPI(
     title="VidMax HD Extraction Engine",
     description="High-performance multi-platform video stream extraction API",
-    version="2.1.0"
+    version="2.2.0"
 )
 
 # Enable CORS for Android client requests
@@ -23,9 +23,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- IN-MEMORY TTL CACHE ---
+# --- IN-MEMORY TTL CACHE (30 Minute Expiration) ---
 CACHE: Dict[str, Dict[str, Any]] = {}
-CACHE_TTL = 1800  # 30 minutes
+CACHE_TTL = 1800  # seconds
 
 def get_from_cache(url: str) -> Optional[Dict[str, Any]]:
     if url in CACHE:
@@ -40,40 +40,30 @@ def set_to_cache(url: str, data: Dict[str, Any]):
     CACHE[url] = {"data": data, "timestamp": time.time()}
 
 
-# --- CUSTOM DIRECT FACEBOOK SCRAPER (Bypasses yt-dlp Cloud IP Blocks) ---
+# --- CUSTOM DIRECT FACEBOOK SCRAPER ---
 def extract_facebook_direct(url: str) -> Optional[Dict[str, Any]]:
-    """Extracts direct MP4 URLs from Facebook without triggering yt-dlp parser blocks."""
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
         'Accept-Language': 'en-US,en;q=0.9',
-        'Sec-Fetch-Dest': 'document',
-        'Sec-Fetch-Mode': 'navigate',
     }
-
     try:
         session = requests.Session()
         res = session.get(url, headers=headers, timeout=10, allow_redirects=True)
         html_content = res.text
 
-        # Extract Video Title
         title_match = re.search(r'<title>(.*?)</title>', html_content)
         title = html.unescape(title_match.group(1)) if title_match else "Facebook Video"
         title = title.replace(" | Facebook", "").strip()
 
-        # Extract Thumbnail
         thumb_match = re.search(r'property="og:image"\s+content="([^"]+)"', html_content)
         thumbnail = html.unescape(thumb_match.group(1)) if thumb_match else ""
 
         qualities = []
-
-        # Find HD video link in page scripts/meta
         hd_match = (
             re.search(r'"playable_url_quality_hd":"([^"]+)"', html_content) or
             re.search(r'hd_src:"([^"]+)"', html_content) or
             re.search(r'"browser_native_hd_url":"([^"]+)"', html_content)
         )
-
-        # Find SD video link in page scripts/meta
         sd_match = (
             re.search(r'"playable_url":"([^"]+)"', html_content) or
             re.search(r'sd_src:"([^"]+)"', html_content) or
@@ -117,25 +107,30 @@ def extract_facebook_direct(url: str) -> Optional[Dict[str, Any]]:
             }
     except Exception:
         pass
-
     return None
 
 
 # --- CORE EXTRACTION ENGINE ---
 def extract_media_sync(target_url: str) -> Dict[str, Any]:
-    # 1. Use Direct Scraper for Facebook links
+    # 1. Direct Scraper for Facebook links
     if "facebook.com" in target_url or "fb.watch" in target_url:
         fb_data = extract_facebook_direct(target_url)
         if fb_data:
             return fb_data
 
-    # 2. General yt-dlp extractor for YouTube, TikTok, Instagram, etc.
+    # 2. General yt-dlp Extractor with YouTube Mobile/TV Client Spoofing
     ydl_opts = {
         'format': 'best',
         'quiet': True,
         'no_warnings': True,
         'skip_download': True,
         'allow_unplayable_formats': False,
+        # Bypass YouTube's datacenter IP bot block on cloud servers
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['android', 'ios', 'mweb', 'tv_embedded']
+            }
+        },
         'http_headers': {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
             'Accept-Language': 'en-US,en;q=0.9',
@@ -206,7 +201,7 @@ def extract_media_sync(target_url: str) -> Dict[str, Any]:
 
 @app.get("/")
 def health_check():
-    return {"status": "online", "engine": "VidMax HD Hybrid Engine 2.1"}
+    return {"status": "online", "engine": "VidMax HD Engine 2.2"}
 
 
 @app.get("/download")
