@@ -49,11 +49,15 @@ def resolve_share_url(url: str) -> str:
     if any(domain in url for domain in shortener_domains):
         try:
             headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+                "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1"
             }
             res = requests.get(url, allow_redirects=True, timeout=8, headers=headers, stream=True)
             resolved = res.url
-            # Strip Facebook noscript tracking flags
+
+            # Clean TikTok tracking query parameters that break yt-dlp parsing
+            if "tiktok.com" in resolved and "?" in resolved:
+                resolved = resolved.split("?")[0]
+
             resolved = resolved.replace("?_fb_noscript=1", "").replace("&_fb_noscript=1", "")
             return resolved
         except Exception:
@@ -70,20 +74,21 @@ def extract_media_sync(target_url: str) -> Dict[str, Any]:
         'no_warnings': True,
         'skip_download': True,
         'allow_unplayable_formats': False,
-        'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'http_headers': {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+            'Accept-Language': 'en-US,en;q=0.9',
+        },
     }
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(target_url, download=False)
         clean_info = ydl.sanitize_info(info)
 
-        # Categorize available direct download streams
         qualities: List[Dict[str, Any]] = []
         seen_resolutions = set()
 
         raw_formats = clean_info.get("formats", [])
 
-        # Sort formats highest quality first
         for f in reversed(raw_formats):
             direct_url = f.get("url")
             vcodec = f.get("vcodec", "none")
@@ -94,7 +99,6 @@ def extract_media_sync(target_url: str) -> Dict[str, Any]:
             if not direct_url:
                 continue
 
-            # Video + Audio combined or progressive streams
             if height and height >= 144 and vcodec != "none":
                 res_label = f"{height}p"
                 if res_label not in seen_resolutions:
@@ -107,7 +111,6 @@ def extract_media_sync(target_url: str) -> Dict[str, Any]:
                         "download_url": direct_url
                     })
 
-            # Audio-only stream (for MP3 download mode)
             elif vcodec == "none" and acodec != "none" and "audio" not in seen_resolutions:
                 seen_resolutions.add("audio")
                 qualities.append({
@@ -118,7 +121,6 @@ def extract_media_sync(target_url: str) -> Dict[str, Any]:
                     "download_url": direct_url
                 })
 
-        # Fallback if specific formats weren't parsed in formats array
         if not qualities and clean_info.get("url"):
             qualities.append({
                 "quality": "HD Best Quality",
