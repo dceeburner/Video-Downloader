@@ -1,7 +1,6 @@
 import asyncio
 import time
 import re
-import html
 from typing import Dict, Any, List, Optional
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -10,8 +9,8 @@ import yt_dlp
 
 app = FastAPI(
     title="VidMax HD Extraction Engine",
-    description="Cascading Multi-Engine Video Downloader Backend",
-    version="3.0.0"
+    description="Multi-Engine Video Downloader Backend",
+    version="3.1.0"
 )
 
 app.add_middleware(
@@ -38,63 +37,70 @@ def set_to_cache(url: str, data: Dict[str, Any]):
     CACHE[url] = {"data": data, "timestamp": time.time()}
 
 
-# --- ENGINE 1: COBALT FALLBACK ENGINE (Handles Bot-Protected YouTube & Facebook Links) ---
-def extract_via_cobalt_fallback(target_url: str) -> Optional[Dict[str, Any]]:
-    """Primary/Fallback engine utilizing open-source processing nodes."""
-    cobalt_instances = [
-        "https://api.cobalt.tools/",
-        "https://cobalt-api.kwiatekmom.pl/",
+# --- ENGINE 1: PIPED YOUTUBE STREAM ENGINE (Bypasses Datacenter Bot Checks) ---
+def extract_youtube_piped(target_url: str) -> Optional[Dict[str, Any]]:
+    """Extracts YouTube streams via Piped API instances without requiring cookies."""
+    # Extract 11-character YouTube Video ID
+    video_id_match = re.search(r'(?:v=|\/shorts\/|youtu\.be\/)([a-zA-Z0-9_-]{11})', target_url)
+    if not video_id_match:
+        return None
+
+    video_id = video_id_match.group(1)
+
+    piped_instances = [
+        "https://pipedapi.kavin.rocks",
+        "https://api.piped.privacydev.net",
+        "https://pipedapi.palvelu.org",
+        "https://pipedapi.adminforge.de"
     ]
 
     headers = {
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122.0.0.0 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
     }
 
-    payload = {
-        "url": target_url,
-        "videoQuality": "max",
-        "youtubeVideoCodec": "h264",
-        "audioFormat": "mp3"
-    }
-
-    for instance in cobalt_instances:
+    for instance in piped_instances:
         try:
-            res = requests.post(instance, json=payload, headers=headers, timeout=8)
+            res = requests.get(f"{instance}/streams/{video_id}", headers=headers, timeout=6)
             if res.status_code == 200:
                 data = res.json()
-                status = data.get("status")
-
                 qualities = []
-                if status in ["stream", "redirect"]:
-                    download_url = data.get("url")
-                    if download_url:
+                seen_res = set()
+
+                # Process Video Streams
+                for stream in data.get("videoStreams", []):
+                    quality_label = stream.get("quality") or f"{stream.get('height')}p"
+                    mime_type = stream.get("mimeType", "")
+
+                    if stream.get("url") and quality_label not in seen_res:
+                        seen_res.add(quality_label)
                         qualities.append({
-                            "quality": "HD Best Quality",
+                            "quality": quality_label,
                             "type": "video",
-                            "extension": "mp4",
-                            "size_bytes": None,
-                            "download_url": download_url
+                            "extension": "mp4" if "mp4" in mime_type else "webm",
+                            "size_bytes": stream.get("bitrate"),
+                            "download_url": stream.get("url")
                         })
-                elif status == "picker":
-                    for item in data.get("picker", []):
-                        if item.get("type") in ["video", "photo"] and item.get("url"):
-                            qualities.append({
-                                "quality": "HD Media",
-                                "type": item.get("type"),
-                                "extension": "mp4" if item.get("type") == "video" else "jpg",
-                                "size_bytes": None,
-                                "download_url": item.get("url")
-                            })
+
+                # Process Audio Streams
+                for audio in data.get("audioStreams", []):
+                    if audio.get("url") and "audio" not in seen_res:
+                        seen_res.add("audio")
+                        qualities.append({
+                            "quality": "Audio Only (MP3/M4A)",
+                            "type": "audio",
+                            "extension": "m4a",
+                            "size_bytes": audio.get("bitrate"),
+                            "download_url": audio.get("url")
+                        })
+                        break
 
                 if qualities:
                     return {
                         "success": True,
-                        "title": data.get("filename") or "Downloaded Media",
-                        "thumbnail": None,
-                        "duration": 0,
-                        "platform": "Cobalt Engine",
+                        "title": data.get("title", "YouTube Video"),
+                        "thumbnail": data.get("thumbnailUrl"),
+                        "duration": data.get("duration", 0),
+                        "platform": "YouTube",
                         "qualities": qualities
                     }
         except Exception:
@@ -103,7 +109,7 @@ def extract_via_cobalt_fallback(target_url: str) -> Optional[Dict[str, Any]]:
     return None
 
 
-# --- ENGINE 2: LOCAL YT-DLP ENGINE ---
+# --- ENGINE 2: STANDARD YT-DLP ENGINE (TikTok, Instagram, Facebook, etc.) ---
 def extract_via_yt_dlp(target_url: str) -> Dict[str, Any]:
     ydl_opts = {
         'format': 'best',
@@ -111,11 +117,6 @@ def extract_via_yt_dlp(target_url: str) -> Dict[str, Any]:
         'no_warnings': True,
         'skip_download': True,
         'allow_unplayable_formats': False,
-        'extractor_args': {
-            'youtube': {
-                'player_client': ['android', 'ios', 'mweb', 'tv_embedded']
-            }
-        },
         'http_headers': {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
             'Accept-Language': 'en-US,en;q=0.9',
@@ -182,27 +183,23 @@ def extract_via_yt_dlp(target_url: str) -> Dict[str, Any]:
         }
 
 
-# --- MASTER CASCADING CONTROLLER ---
-def extract_media_cascading(target_url: str) -> Dict[str, Any]:
-    # Phase 1: Try Local yt-dlp first
-    try:
-        return extract_via_yt_dlp(target_url)
-    except Exception as local_err:
-        print(f"Local extraction failed: {local_err}. Invoking Fallback Engine...")
+# --- ROUTER CONTROLLER ---
+def extract_media(target_url: str) -> Dict[str, Any]:
+    # 1. Route YouTube links through YouTube Piped Engine
+    if "youtube.com" in target_url or "youtu.be" in target_url:
+        yt_data = extract_youtube_piped(target_url)
+        if yt_data:
+            return yt_data
 
-    # Phase 2: If local extraction hits bot check or unsupported URL, execute Fallback Engine
-    fallback_data = extract_via_cobalt_fallback(target_url)
-    if fallback_data:
-        return fallback_data
-
-    raise Exception("Extraction failed across all primary and fallback processing nodes.")
+    # 2. Route TikTok, Instagram, and other sites through yt-dlp
+    return extract_via_yt_dlp(target_url)
 
 
 # --- API ENDPOINTS ---
 
 @app.get("/")
 def health_check():
-    return {"status": "online", "engine": "VidMax HD Cascading Engine 3.0"}
+    return {"status": "online", "engine": "VidMax HD Multi-Engine 3.1"}
 
 
 @app.get("/download")
@@ -217,7 +214,7 @@ async def extract_video(url: str = Query(..., description="Target video URL")):
         return cached_data
 
     try:
-        data = await asyncio.to_thread(extract_media_cascading, url)
+        data = await asyncio.to_thread(extract_media, url)
         data["cached"] = False
         set_to_cache(url, data)
         return data
