@@ -1,16 +1,16 @@
 import asyncio
 import time
-import re
 from typing import Dict, Any, List, Optional
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 import requests
 import yt_dlp
 
 app = FastAPI(
     title="VidMax HD Extraction Engine",
-    description="Multi-Engine Video Downloader Backend",
-    version="3.1.0"
+    description="Multi-Platform Video Downloader Backend",
+    version="3.5.0"
 )
 
 app.add_middleware(
@@ -37,86 +37,16 @@ def set_to_cache(url: str, data: Dict[str, Any]):
     CACHE[url] = {"data": data, "timestamp": time.time()}
 
 
-# --- ENGINE 1: PIPED YOUTUBE STREAM ENGINE (Bypasses Datacenter Bot Checks) ---
-def extract_youtube_piped(target_url: str) -> Optional[Dict[str, Any]]:
-    """Extracts YouTube streams via Piped API instances without requiring cookies."""
-    # Extract 11-character YouTube Video ID
-    video_id_match = re.search(r'(?:v=|\/shorts\/|youtu\.be\/)([a-zA-Z0-9_-]{11})', target_url)
-    if not video_id_match:
-        return None
-
-    video_id = video_id_match.group(1)
-
-    piped_instances = [
-        "https://pipedapi.kavin.rocks",
-        "https://api.piped.privacydev.net",
-        "https://pipedapi.palvelu.org",
-        "https://pipedapi.adminforge.de"
-    ]
-
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-    }
-
-    for instance in piped_instances:
-        try:
-            res = requests.get(f"{instance}/streams/{video_id}", headers=headers, timeout=6)
-            if res.status_code == 200:
-                data = res.json()
-                qualities = []
-                seen_res = set()
-
-                # Process Video Streams
-                for stream in data.get("videoStreams", []):
-                    quality_label = stream.get("quality") or f"{stream.get('height')}p"
-                    mime_type = stream.get("mimeType", "")
-
-                    if stream.get("url") and quality_label not in seen_res:
-                        seen_res.add(quality_label)
-                        qualities.append({
-                            "quality": quality_label,
-                            "type": "video",
-                            "extension": "mp4" if "mp4" in mime_type else "webm",
-                            "size_bytes": stream.get("bitrate"),
-                            "download_url": stream.get("url")
-                        })
-
-                # Process Audio Streams
-                for audio in data.get("audioStreams", []):
-                    if audio.get("url") and "audio" not in seen_res:
-                        seen_res.add("audio")
-                        qualities.append({
-                            "quality": "Audio Only (MP3/M4A)",
-                            "type": "audio",
-                            "extension": "m4a",
-                            "size_bytes": audio.get("bitrate"),
-                            "download_url": audio.get("url")
-                        })
-                        break
-
-                if qualities:
-                    return {
-                        "success": True,
-                        "title": data.get("title", "YouTube Video"),
-                        "thumbnail": data.get("thumbnailUrl"),
-                        "duration": data.get("duration", 0),
-                        "platform": "YouTube",
-                        "qualities": qualities
-                    }
-        except Exception:
-            continue
-
-    return None
-
-
-# --- ENGINE 2: STANDARD YT-DLP ENGINE (TikTok, Instagram, Facebook, etc.) ---
-def extract_via_yt_dlp(target_url: str) -> Dict[str, Any]:
+# --- CORE EXTRACTION LOGIC ---
+def extract_media(target_url: str, base_host: str) -> Dict[str, Any]:
+    # General robust extraction settings for yt-dlp
     ydl_opts = {
-        'format': 'best',
+        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
         'quiet': True,
         'no_warnings': True,
         'skip_download': True,
         'allow_unplayable_formats': False,
+        'ignoreerrors': True,
         'http_headers': {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
             'Accept-Language': 'en-US,en;q=0.9',
@@ -125,13 +55,18 @@ def extract_via_yt_dlp(target_url: str) -> Dict[str, Any]:
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(target_url, download=False)
+        if not info:
+            raise Exception("Could not extract metadata from URL.")
+
         clean_info = ydl.sanitize_info(info)
+        is_youtube = "youtube.com" in target_url or "youtu.be" in target_url
 
         qualities: List[Dict[str, Any]] = []
         seen_resolutions = set()
 
         raw_formats = clean_info.get("formats", [])
 
+        # Reverse to prioritize highest quality
         for f in reversed(raw_formats):
             direct_url = f.get("url")
             vcodec = f.get("vcodec", "none")
@@ -142,40 +77,61 @@ def extract_via_yt_dlp(target_url: str) -> Dict[str, Any]:
             if not direct_url:
                 continue
 
+            # Process Video + Audio or Combined Formats
             if height and height >= 144 and vcodec != "none":
                 res_label = f"{height}p"
                 if res_label not in seen_resolutions:
                     seen_resolutions.add(res_label)
+
+                    # For YouTube, proxy through server to avoid 403 IP-lock
+                    if is_youtube:
+                        final_download_url = f"{base_host}/stream?stream_url={requests.utils.quote(direct_url)}"
+                    else:
+                        final_download_url = direct_url
+
                     qualities.append({
                         "quality": res_label,
                         "type": "video",
                         "extension": ext if ext != "m3u8" else "mp4",
                         "size_bytes": f.get("filesize") or f.get("filesize_approx"),
-                        "download_url": direct_url
+                        "download_url": final_download_url
                     })
 
+            # Process Audio Only
             elif vcodec == "none" and acodec != "none" and "audio" not in seen_resolutions:
                 seen_resolutions.add("audio")
+                if is_youtube:
+                    final_download_url = f"{base_host}/stream?stream_url={requests.utils.quote(direct_url)}"
+                else:
+                    final_download_url = direct_url
+
                 qualities.append({
-                    "quality": "Audio Only (MP3/M4A)",
+                    "quality": "Audio Only",
                     "type": "audio",
                     "extension": ext,
                     "size_bytes": f.get("filesize") or f.get("filesize_approx"),
-                    "download_url": direct_url
+                    "download_url": final_download_url
                 })
 
+        # Fallback if specific formats were not parsed separately
         if not qualities and clean_info.get("url"):
+            direct_url = clean_info.get("url")
+            if is_youtube:
+                final_download_url = f"{base_host}/stream?stream_url={requests.utils.quote(direct_url)}"
+            else:
+                final_download_url = direct_url
+
             qualities.append({
                 "quality": "HD Best Quality",
                 "type": "video",
                 "extension": clean_info.get("ext", "mp4"),
                 "size_bytes": clean_info.get("filesize"),
-                "download_url": clean_info.get("url")
+                "download_url": final_download_url
             })
 
         return {
             "success": True,
-            "title": clean_info.get("title", "Video"),
+            "title": clean_info.get("title", "VidMax HD Media"),
             "thumbnail": clean_info.get("thumbnail"),
             "duration": clean_info.get("duration", 0),
             "platform": clean_info.get("extractor_key", "Unknown"),
@@ -183,30 +139,21 @@ def extract_via_yt_dlp(target_url: str) -> Dict[str, Any]:
         }
 
 
-# --- ROUTER CONTROLLER ---
-def extract_media(target_url: str) -> Dict[str, Any]:
-    # 1. Route YouTube links through YouTube Piped Engine
-    if "youtube.com" in target_url or "youtu.be" in target_url:
-        yt_data = extract_youtube_piped(target_url)
-        if yt_data:
-            return yt_data
-
-    # 2. Route TikTok, Instagram, and other sites through yt-dlp
-    return extract_via_yt_dlp(target_url)
-
-
-# --- API ENDPOINTS ---
+# --- ENDPOINTS ---
 
 @app.get("/")
 def health_check():
-    return {"status": "online", "engine": "VidMax HD Multi-Engine 3.1"}
+    return {"status": "online", "engine": "VidMax HD Engine 3.5"}
 
 
 @app.get("/download")
 @app.get("/extract")
-async def extract_video(url: str = Query(..., description="Target video URL")):
+async def extract_video(url: str = Query(..., description="Target media URL")):
     if not url:
         raise HTTPException(status_code=400, detail="URL parameter is required.")
+
+    # Base domain of your Render deployment
+    base_host = "https://video-downloader-o8c7.onrender.com"
 
     cached_data = get_from_cache(url)
     if cached_data:
@@ -214,9 +161,29 @@ async def extract_video(url: str = Query(..., description="Target video URL")):
         return cached_data
 
     try:
-        data = await asyncio.to_thread(extract_media, url)
+        data = await asyncio.to_thread(extract_media, url, base_host)
         data["cached"] = False
         set_to_cache(url, data)
         return data
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Extraction failed: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"Extraction error: {str(e)}")
+
+
+@app.get("/stream")
+async def proxy_stream(stream_url: str = Query(..., description="Encrypted/Encoded YouTube Stream URL")):
+    """Proxies video streams through Render to fix 403 IP-binding errors on Android devices."""
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+    }
+
+    def iter_file():
+        with requests.get(stream_url, headers=headers, stream=True) as r:
+            r.raise_for_status()
+            for chunk in r.iter_content(chunk_size=65536):
+                if chunk:
+                    yield chunk
+
+    try:
+        return StreamingResponse(iter_file(), media_type="video/mp4")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Proxy error: {str(e)}")
