@@ -10,11 +10,10 @@ import yt_dlp
 
 app = FastAPI(
     title="VidMax HD Extraction Engine",
-    description="High-performance multi-platform video stream extraction API",
-    version="2.2.0"
+    description="Cascading Multi-Engine Video Downloader Backend",
+    version="3.0.0"
 )
 
-# Enable CORS for Android client requests
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -23,9 +22,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- IN-MEMORY TTL CACHE (30 Minute Expiration) ---
 CACHE: Dict[str, Dict[str, Any]] = {}
-CACHE_TTL = 1800  # seconds
+CACHE_TTL = 1800  # 30 minutes
 
 def get_from_cache(url: str) -> Optional[Dict[str, Any]]:
     if url in CACHE:
@@ -40,92 +38,79 @@ def set_to_cache(url: str, data: Dict[str, Any]):
     CACHE[url] = {"data": data, "timestamp": time.time()}
 
 
-# --- CUSTOM DIRECT FACEBOOK SCRAPER ---
-def extract_facebook_direct(url: str) -> Optional[Dict[str, Any]]:
+# --- ENGINE 1: COBALT FALLBACK ENGINE (Handles Bot-Protected YouTube & Facebook Links) ---
+def extract_via_cobalt_fallback(target_url: str) -> Optional[Dict[str, Any]]:
+    """Primary/Fallback engine utilizing open-source processing nodes."""
+    cobalt_instances = [
+        "https://api.cobalt.tools/",
+        "https://cobalt-api.kwiatekmom.pl/",
+    ]
+
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-        'Accept-Language': 'en-US,en;q=0.9',
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122.0.0.0 Safari/537.36"
     }
-    try:
-        session = requests.Session()
-        res = session.get(url, headers=headers, timeout=10, allow_redirects=True)
-        html_content = res.text
 
-        title_match = re.search(r'<title>(.*?)</title>', html_content)
-        title = html.unescape(title_match.group(1)) if title_match else "Facebook Video"
-        title = title.replace(" | Facebook", "").strip()
+    payload = {
+        "url": target_url,
+        "videoQuality": "max",
+        "youtubeVideoCodec": "h264",
+        "audioFormat": "mp3"
+    }
 
-        thumb_match = re.search(r'property="og:image"\s+content="([^"]+)"', html_content)
-        thumbnail = html.unescape(thumb_match.group(1)) if thumb_match else ""
+    for instance in cobalt_instances:
+        try:
+            res = requests.post(instance, json=payload, headers=headers, timeout=8)
+            if res.status_code == 200:
+                data = res.json()
+                status = data.get("status")
 
-        qualities = []
-        hd_match = (
-            re.search(r'"playable_url_quality_hd":"([^"]+)"', html_content) or
-            re.search(r'hd_src:"([^"]+)"', html_content) or
-            re.search(r'"browser_native_hd_url":"([^"]+)"', html_content)
-        )
-        sd_match = (
-            re.search(r'"playable_url":"([^"]+)"', html_content) or
-            re.search(r'sd_src:"([^"]+)"', html_content) or
-            re.search(r'"browser_native_sd_url":"([^"]+)"', html_content) or
-            re.search(r'property="og:video:secure_url"\s+content="([^"]+)"', html_content) or
-            re.search(r'property="og:video"\s+content="([^"]+)"', html_content)
-        )
+                qualities = []
+                if status in ["stream", "redirect"]:
+                    download_url = data.get("url")
+                    if download_url:
+                        qualities.append({
+                            "quality": "HD Best Quality",
+                            "type": "video",
+                            "extension": "mp4",
+                            "size_bytes": None,
+                            "download_url": download_url
+                        })
+                elif status == "picker":
+                    for item in data.get("picker", []):
+                        if item.get("type") in ["video", "photo"] and item.get("url"):
+                            qualities.append({
+                                "quality": "HD Media",
+                                "type": item.get("type"),
+                                "extension": "mp4" if item.get("type") == "video" else "jpg",
+                                "size_bytes": None,
+                                "download_url": item.get("url")
+                            })
 
-        def clean_stream_url(raw_url: str) -> str:
-            cleaned = raw_url.replace(r'\/', '/').replace(r'\u0025', '%')
-            return html.unescape(cleaned)
+                if qualities:
+                    return {
+                        "success": True,
+                        "title": data.get("filename") or "Downloaded Media",
+                        "thumbnail": None,
+                        "duration": 0,
+                        "platform": "Cobalt Engine",
+                        "qualities": qualities
+                    }
+        except Exception:
+            continue
 
-        if hd_match:
-            qualities.append({
-                "quality": "1080p HD",
-                "type": "video",
-                "extension": "mp4",
-                "size_bytes": None,
-                "download_url": clean_stream_url(hd_match.group(1))
-            })
-
-        if sd_match:
-            sd_url = clean_stream_url(sd_match.group(1))
-            if not qualities or qualities[0]["download_url"] != sd_url:
-                qualities.append({
-                    "quality": "720p / 480p SD",
-                    "type": "video",
-                    "extension": "mp4",
-                    "size_bytes": None,
-                    "download_url": sd_url
-                })
-
-        if qualities:
-            return {
-                "success": True,
-                "title": title,
-                "thumbnail": thumbnail,
-                "duration": 0,
-                "platform": "Facebook",
-                "qualities": qualities
-            }
-    except Exception:
-        pass
     return None
 
 
-# --- CORE EXTRACTION ENGINE ---
-def extract_media_sync(target_url: str) -> Dict[str, Any]:
-    # 1. Direct Scraper for Facebook links
-    if "facebook.com" in target_url or "fb.watch" in target_url:
-        fb_data = extract_facebook_direct(target_url)
-        if fb_data:
-            return fb_data
-
-    # 2. General yt-dlp Extractor with YouTube Mobile/TV Client Spoofing
+# --- ENGINE 2: LOCAL YT-DLP ENGINE ---
+def extract_via_yt_dlp(target_url: str) -> Dict[str, Any]:
     ydl_opts = {
         'format': 'best',
         'quiet': True,
         'no_warnings': True,
         'skip_download': True,
         'allow_unplayable_formats': False,
-        # Bypass YouTube's datacenter IP bot block on cloud servers
         'extractor_args': {
             'youtube': {
                 'player_client': ['android', 'ios', 'mweb', 'tv_embedded']
@@ -197,11 +182,27 @@ def extract_media_sync(target_url: str) -> Dict[str, Any]:
         }
 
 
+# --- MASTER CASCADING CONTROLLER ---
+def extract_media_cascading(target_url: str) -> Dict[str, Any]:
+    # Phase 1: Try Local yt-dlp first
+    try:
+        return extract_via_yt_dlp(target_url)
+    except Exception as local_err:
+        print(f"Local extraction failed: {local_err}. Invoking Fallback Engine...")
+
+    # Phase 2: If local extraction hits bot check or unsupported URL, execute Fallback Engine
+    fallback_data = extract_via_cobalt_fallback(target_url)
+    if fallback_data:
+        return fallback_data
+
+    raise Exception("Extraction failed across all primary and fallback processing nodes.")
+
+
 # --- API ENDPOINTS ---
 
 @app.get("/")
 def health_check():
-    return {"status": "online", "engine": "VidMax HD Engine 2.2"}
+    return {"status": "online", "engine": "VidMax HD Cascading Engine 3.0"}
 
 
 @app.get("/download")
@@ -216,7 +217,7 @@ async def extract_video(url: str = Query(..., description="Target video URL")):
         return cached_data
 
     try:
-        data = await asyncio.to_thread(extract_media_sync, url)
+        data = await asyncio.to_thread(extract_media_cascading, url)
         data["cached"] = False
         set_to_cache(url, data)
         return data
