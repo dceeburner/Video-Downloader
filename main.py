@@ -1,5 +1,6 @@
 import asyncio
 import time
+import re
 from typing import Dict, Any, List, Optional
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -41,6 +42,13 @@ def set_to_cache(url: str, data: Dict[str, Any]):
 # --- SUPERSONIC URL RESOLVER ---
 def resolve_share_url(url: str) -> str:
     """Resolves share links, redirects, and cleans tracking parameters."""
+
+    # 1. Convert Facebook share links (/share/v/ID or /share/r/ID) directly to canonical watch links
+    fb_share_match = re.search(r'facebook\.com/share/(?:v|r)/([a-zA-Z0-9_-]+)', url)
+    if fb_share_match:
+        video_id = fb_share_match.group(1)
+        return f"https://www.facebook.com/watch/?v={video_id}"
+
     shortener_domains = [
         "facebook.com/share", "fb.watch", "vt.tiktok.com",
         "vm.tiktok.com", "t.co", "youtu.be", "instagram.com/share"
@@ -49,19 +57,24 @@ def resolve_share_url(url: str) -> str:
     if any(domain in url for domain in shortener_domains):
         try:
             headers = {
-                "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1"
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
             }
             res = requests.get(url, allow_redirects=True, timeout=8, headers=headers, stream=True)
             resolved = res.url
 
-            # Clean TikTok tracking query parameters that break yt-dlp parsing
-            if "tiktok.com" in resolved and "?" in resolved:
+            # Check if redirected URL became a Facebook share path
+            fb_match = re.search(r'facebook\.com/share/(?:v|r)/([a-zA-Z0-9_-]+)', resolved)
+            if fb_match:
+                return f"https://www.facebook.com/watch/?v={fb_match.group(1)}"
+
+            # Strip tracking query parameters for TikTok/Facebook
+            if "?" in resolved and ("tiktok.com" in resolved or "facebook.com" in resolved):
                 resolved = resolved.split("?")[0]
 
-            resolved = resolved.replace("?_fb_noscript=1", "").replace("&_fb_noscript=1", "")
             return resolved
         except Exception:
             pass
+
     return url
 
 
