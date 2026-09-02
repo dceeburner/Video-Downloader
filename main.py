@@ -5,17 +5,24 @@ import requests
 # Create the FastAPI app
 app = FastAPI(title="Social Media Video Downloader")
 
+@app.get("/")
+def health_check():
+    return {"status": "online"}
+
 def clean_url(url: str) -> str:
     # Resolve Facebook share and shortened redirect links
     if "facebook.com/share" in url or "fb.watch" in url:
         try:
-            response = requests.head(
-                url,
-                allow_redirects=True,
-                timeout=5,
-                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-            )
-            return response.url.split('?')[0] # Strips tracking params like ?_fb_noscript=1
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            }
+            # Use GET with stream=True to follow full redirects without downloading the video body
+            response = requests.get(url, allow_redirects=True, timeout=8, headers=headers, stream=True)
+            final_url = response.url
+
+            # Clean off noscript tracking flags without breaking 'watch?v=' parameters
+            final_url = final_url.replace("?_fb_noscript=1", "").replace("&_fb_noscript=1", "")
+            return final_url
         except Exception:
             pass
     return url
