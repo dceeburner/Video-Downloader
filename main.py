@@ -1,6 +1,7 @@
 import asyncio
 import time
 import re
+import html
 from typing import Dict, Any, List, Optional
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -10,7 +11,7 @@ import yt_dlp
 app = FastAPI(
     title="VidMax HD Extraction Engine",
     description="High-performance multi-platform video stream extraction API",
-    version="2.0.0"
+    version="2.1.0"
 )
 
 # Enable CORS for Android client requests
@@ -22,9 +23,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- IN-MEMORY TTL CACHE (30 Minute Expiration) ---
+# --- IN-MEMORY TTL CACHE ---
 CACHE: Dict[str, Dict[str, Any]] = {}
-CACHE_TTL = 1800  # seconds
+CACHE_TTL = 1800  # 30 minutes
 
 def get_from_cache(url: str) -> Optional[Dict[str, Any]]:
     if url in CACHE:
@@ -39,48 +40,96 @@ def set_to_cache(url: str, data: Dict[str, Any]):
     CACHE[url] = {"data": data, "timestamp": time.time()}
 
 
-# --- SUPERSONIC URL RESOLVER ---
-def resolve_share_url(url: str) -> str:
-    """Resolves share links, redirects, and cleans tracking parameters."""
+# --- CUSTOM DIRECT FACEBOOK SCRAPER (Bypasses yt-dlp Cloud IP Blocks) ---
+def extract_facebook_direct(url: str) -> Optional[Dict[str, Any]]:
+    """Extracts direct MP4 URLs from Facebook without triggering yt-dlp parser blocks."""
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+    }
 
-    # 1. Convert Facebook share links (/share/v/ID or /share/r/ID) directly to canonical watch links
-    fb_share_match = re.search(r'facebook\.com/share/(?:v|r)/([a-zA-Z0-9_-]+)', url)
-    if fb_share_match:
-        video_id = fb_share_match.group(1)
-        return f"https://www.facebook.com/watch/?v={video_id}"
+    try:
+        session = requests.Session()
+        res = session.get(url, headers=headers, timeout=10, allow_redirects=True)
+        html_content = res.text
 
-    shortener_domains = [
-        "facebook.com/share", "fb.watch", "vt.tiktok.com",
-        "vm.tiktok.com", "t.co", "youtu.be", "instagram.com/share"
-    ]
+        # Extract Video Title
+        title_match = re.search(r'<title>(.*?)</title>', html_content)
+        title = html.unescape(title_match.group(1)) if title_match else "Facebook Video"
+        title = title.replace(" | Facebook", "").strip()
 
-    if any(domain in url for domain in shortener_domains):
-        try:
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+        # Extract Thumbnail
+        thumb_match = re.search(r'property="og:image"\s+content="([^"]+)"', html_content)
+        thumbnail = html.unescape(thumb_match.group(1)) if thumb_match else ""
+
+        qualities = []
+
+        # Find HD video link in page scripts/meta
+        hd_match = (
+            re.search(r'"playable_url_quality_hd":"([^"]+)"', html_content) or
+            re.search(r'hd_src:"([^"]+)"', html_content) or
+            re.search(r'"browser_native_hd_url":"([^"]+)"', html_content)
+        )
+
+        # Find SD video link in page scripts/meta
+        sd_match = (
+            re.search(r'"playable_url":"([^"]+)"', html_content) or
+            re.search(r'sd_src:"([^"]+)"', html_content) or
+            re.search(r'"browser_native_sd_url":"([^"]+)"', html_content) or
+            re.search(r'property="og:video:secure_url"\s+content="([^"]+)"', html_content) or
+            re.search(r'property="og:video"\s+content="([^"]+)"', html_content)
+        )
+
+        def clean_stream_url(raw_url: str) -> str:
+            cleaned = raw_url.replace(r'\/', '/').replace(r'\u0025', '%')
+            return html.unescape(cleaned)
+
+        if hd_match:
+            qualities.append({
+                "quality": "1080p HD",
+                "type": "video",
+                "extension": "mp4",
+                "size_bytes": None,
+                "download_url": clean_stream_url(hd_match.group(1))
+            })
+
+        if sd_match:
+            sd_url = clean_stream_url(sd_match.group(1))
+            if not qualities or qualities[0]["download_url"] != sd_url:
+                qualities.append({
+                    "quality": "720p / 480p SD",
+                    "type": "video",
+                    "extension": "mp4",
+                    "size_bytes": None,
+                    "download_url": sd_url
+                })
+
+        if qualities:
+            return {
+                "success": True,
+                "title": title,
+                "thumbnail": thumbnail,
+                "duration": 0,
+                "platform": "Facebook",
+                "qualities": qualities
             }
-            res = requests.get(url, allow_redirects=True, timeout=8, headers=headers, stream=True)
-            resolved = res.url
+    except Exception:
+        pass
 
-            # Check if redirected URL became a Facebook share path
-            fb_match = re.search(r'facebook\.com/share/(?:v|r)/([a-zA-Z0-9_-]+)', resolved)
-            if fb_match:
-                return f"https://www.facebook.com/watch/?v={fb_match.group(1)}"
-
-            # Strip tracking query parameters for TikTok/Facebook
-            if "?" in resolved and ("tiktok.com" in resolved or "facebook.com" in resolved):
-                resolved = resolved.split("?")[0]
-
-            return resolved
-        except Exception:
-            pass
-
-    return url
+    return None
 
 
 # --- CORE EXTRACTION ENGINE ---
 def extract_media_sync(target_url: str) -> Dict[str, Any]:
-    """Synchronous yt-dlp extractor to run inside thread pool."""
+    # 1. Use Direct Scraper for Facebook links
+    if "facebook.com" in target_url or "fb.watch" in target_url:
+        fb_data = extract_facebook_direct(target_url)
+        if fb_data:
+            return fb_data
+
+    # 2. General yt-dlp extractor for YouTube, TikTok, Instagram, etc.
     ydl_opts = {
         'format': 'best',
         'quiet': True,
@@ -157,33 +206,24 @@ def extract_media_sync(target_url: str) -> Dict[str, Any]:
 
 @app.get("/")
 def health_check():
-    """Health check route for uptime monitors and fast cold-start wakeups."""
-    return {"status": "online", "engine": "VidMax HD Supersonic 2.0"}
+    return {"status": "online", "engine": "VidMax HD Hybrid Engine 2.1"}
 
 
 @app.get("/download")
 @app.get("/extract")
 async def extract_video(url: str = Query(..., description="Target video URL")):
-    """Extracts direct video download links with multi-quality stream options."""
     if not url:
         raise HTTPException(status_code=400, detail="URL parameter is required.")
 
-    clean_target = resolve_share_url(url)
-
-    # Return cached response instantly if available
-    cached_data = get_from_cache(clean_target)
+    cached_data = get_from_cache(url)
     if cached_data:
         cached_data["cached"] = True
         return cached_data
 
     try:
-        # Offload heavy extraction to async worker thread
-        data = await asyncio.to_thread(extract_media_sync, clean_target)
+        data = await asyncio.to_thread(extract_media_sync, url)
         data["cached"] = False
-
-        # Save to cache
-        set_to_cache(clean_target, data)
+        set_to_cache(url, data)
         return data
-
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Extraction failed: {str(e)}")
