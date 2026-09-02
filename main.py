@@ -146,6 +146,7 @@ def health_check():
     return {"status": "online", "engine": "VidMax HD Supersonic 2.0"}
 
 
+@app.get("/download")
 @app.get("/extract")
 async def extract_video(url: str = Query(..., description="Target video URL")):
     """Extracts direct video download links with multi-quality stream options."""
