@@ -1,18 +1,15 @@
-import asyncio
-import time
-from typing import Dict, Any, List, Optional
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+import os
+import random
 import requests
 import yt_dlp
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
+from typing import Optional, List
 
-app = FastAPI(
-    title="VidMax HD Extraction Engine",
-    description="Multi-Platform Video Downloader Backend",
-    version="3.5.0"
-)
+app = FastAPI(title="VidMax HD Backend")
 
+# Enable CORS for Android client requests
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -21,163 +18,107 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-CACHE: Dict[str, Dict[str, Any]] = {}
-CACHE_TTL = 1800  # 30 minutes
+# 1. Load proxies from Render environment variables
+RAW_PROXIES = os.getenv("PROXY_LIST", "")
+PROXY_POOL = [p.strip() for p in RAW_PROXIES.split(",") if p.strip()]
 
-def get_from_cache(url: str) -> Optional[Dict[str, Any]]:
-    if url in CACHE:
-        data, timestamp = CACHE[url]["data"], CACHE[url]["timestamp"]
-        if time.time() - timestamp < CACHE_TTL:
-            return data
-        else:
-            del CACHE[url]
-    return None
+def get_random_proxy() -> Optional[str]:
+    """Selects a random Webshare proxy from the pool."""
+    if not PROXY_POOL:
+        return None
+    return random.choice(PROXY_POOL)
 
-def set_to_cache(url: str, data: Dict[str, Any]):
-    CACHE[url] = {"data": data, "timestamp": time.time()}
+def clean_input_url(url: str) -> str:
+    """Strips accidental leading text or spaces from user input."""
+    cleaned = url.strip()
+    if "http" in cleaned and not cleaned.startswith("http"):
+        cleaned = "http" + cleaned.split("http", 1)[1]
+    return cleaned
 
+@app.get("/")
+def home():
+    return {
+        "status": "online",
+        "proxies_loaded": len(PROXY_POOL),
+        "engine": "VidMax HD Supersonic 3.6"
+    }
 
-# --- CORE EXTRACTION LOGIC ---
-def extract_media(target_url: str, base_host: str) -> Dict[str, Any]:
-    # General robust extraction settings for yt-dlp
+@app.get("/download")
+@app.get("/extract")
+async def extract_media(url: str = Query(...)):
+    if not url:
+        raise HTTPException(status_code=400, detail="URL parameter is required")
+
+    target_url = clean_input_url(url)
+    selected_proxy = get_random_proxy()
+
     ydl_opts = {
         'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
         'quiet': True,
         'no_warnings': True,
         'skip_download': True,
-        'allow_unplayable_formats': False,
-        'ignoreerrors': True,
         'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-            'Accept-Language': 'en-US,en;q=0.9',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
         },
     }
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(target_url, download=False)
-        if not info:
-            raise Exception("Could not extract metadata from URL.")
+    # Pass selected proxy into yt-dlp if available
+    if selected_proxy:
+        ydl_opts['proxy'] = selected_proxy
+        ydl_opts['geo_verification_proxy'] = selected_proxy
 
-        clean_info = ydl.sanitize_info(info)
-        is_youtube = "youtube.com" in target_url or "youtu.be" in target_url
+    try:
+        # Run yt-dlp in a thread to avoid blocking the event loop
+        import asyncio
+        info = await asyncio.to_thread(lambda: yt_dlp.YoutubeDL(ydl_opts).extract_info(target_url, download=False))
 
-        qualities: List[Dict[str, Any]] = []
-        seen_resolutions = set()
+        qualities = []
+        formats = info.get('formats', [])
 
-        raw_formats = clean_info.get("formats", [])
+        # Sort formats by quality (height) in descending order
+        sorted_formats = sorted(formats, key=lambda x: (x.get('height') or 0), reverse=True)
 
-        # Reverse to prioritize highest quality
-        for f in reversed(raw_formats):
-            direct_url = f.get("url")
-            vcodec = f.get("vcodec", "none")
-            acodec = f.get("acodec", "none")
-            height = f.get("height")
-            ext = f.get("ext", "mp4")
-
-            if not direct_url:
-                continue
-
-            # Process Video + Audio or Combined Formats
-            if height and height >= 144 and vcodec != "none":
-                res_label = f"{height}p"
-                if res_label not in seen_resolutions:
-                    seen_resolutions.add(res_label)
-
-                    # For YouTube, proxy through server to avoid 403 IP-lock
-                    if is_youtube:
-                        final_download_url = f"{base_host}/stream?stream_url={requests.utils.quote(direct_url)}"
-                    else:
-                        final_download_url = direct_url
-
+        seen_res = set()
+        for fmt in sorted_formats:
+            format_url = fmt.get('url')
+            if format_url:
+                res = fmt.get('format_note') or fmt.get('resolution') or 'SD'
+                # Avoid duplicates in the quality list
+                if res not in seen_res:
+                    seen_res.add(res)
                     qualities.append({
-                        "quality": res_label,
-                        "type": "video",
-                        "extension": ext if ext != "m3u8" else "mp4",
-                        "size_bytes": f.get("filesize") or f.get("filesize_approx"),
-                        "download_url": final_download_url
+                        'quality': res,
+                        'type': 'video' if fmt.get('vcodec') != 'none' else 'audio',
+                        'extension': fmt.get('ext', 'mp4'),
+                        'download_url': format_url,
+                        'size_bytes': fmt.get('filesize') or fmt.get('filesize_approx')
                     })
-
-            # Process Audio Only
-            elif vcodec == "none" and acodec != "none" and "audio" not in seen_resolutions:
-                seen_resolutions.add("audio")
-                if is_youtube:
-                    final_download_url = f"{base_host}/stream?stream_url={requests.utils.quote(direct_url)}"
-                else:
-                    final_download_url = direct_url
-
-                qualities.append({
-                    "quality": "Audio Only",
-                    "type": "audio",
-                    "extension": ext,
-                    "size_bytes": f.get("filesize") or f.get("filesize_approx"),
-                    "download_url": final_download_url
-                })
-
-        # Fallback if specific formats were not parsed separately
-        if not qualities and clean_info.get("url"):
-            direct_url = clean_info.get("url")
-            if is_youtube:
-                final_download_url = f"{base_host}/stream?stream_url={requests.utils.quote(direct_url)}"
-            else:
-                final_download_url = direct_url
-
-            qualities.append({
-                "quality": "HD Best Quality",
-                "type": "video",
-                "extension": clean_info.get("ext", "mp4"),
-                "size_bytes": clean_info.get("filesize"),
-                "download_url": final_download_url
-            })
 
         return {
             "success": True,
-            "title": clean_info.get("title", "VidMax HD Media"),
-            "thumbnail": clean_info.get("thumbnail"),
-            "duration": clean_info.get("duration", 0),
-            "platform": clean_info.get("extractor_key", "Unknown"),
+            "title": info.get('title'),
+            "thumbnail": info.get('thumbnail'),
+            "duration": info.get('duration'),
+            "platform": info.get('extractor'),
             "qualities": qualities
         }
 
-
-# --- ENDPOINTS ---
-
-@app.get("/")
-def health_check():
-    return {"status": "online", "engine": "VidMax HD Engine 3.5"}
-
-
-@app.get("/download")
-@app.get("/extract")
-async def extract_video(url: str = Query(..., description="Target media URL")):
-    if not url:
-        raise HTTPException(status_code=400, detail="URL parameter is required.")
-
-    # Base domain of your Render deployment
-    base_host = "https://video-downloader-o8c7.onrender.com"
-
-    cached_data = get_from_cache(url)
-    if cached_data:
-        cached_data["cached"] = True
-        return cached_data
-
-    try:
-        data = await asyncio.to_thread(extract_media, url, base_host)
-        data["cached"] = False
-        set_to_cache(url, data)
-        return data
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Extraction error: {str(e)}")
-
+        raise HTTPException(status_code=400, detail=f"Extraction failed: {str(e)}")
 
 @app.get("/stream")
-async def proxy_stream(stream_url: str = Query(..., description="Encrypted/Encoded YouTube Stream URL")):
-    """Proxies video streams through Render to fix 403 IP-binding errors on Android devices."""
+async def proxy_stream(stream_url: str = Query(...)):
+    """Proxies direct video chunks through Webshare to bypass 403 blocks on client devices."""
+    selected_proxy = get_random_proxy()
+    proxies_dict = {"http": selected_proxy, "https": selected_proxy} if selected_proxy else None
+
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
     }
 
     def iter_file():
-        with requests.get(stream_url, headers=headers, stream=True) as r:
+        # Use requests with the selected proxy
+        with requests.get(stream_url, headers=headers, proxies=proxies_dict, stream=True) as r:
             r.raise_for_status()
             for chunk in r.iter_content(chunk_size=65536):
                 if chunk:
@@ -186,4 +127,4 @@ async def proxy_stream(stream_url: str = Query(..., description="Encrypted/Encod
     try:
         return StreamingResponse(iter_file(), media_type="video/mp4")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Proxy error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Stream proxy error: {str(e)}")
