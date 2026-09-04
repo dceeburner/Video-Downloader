@@ -39,6 +39,19 @@ def clean_input_url(url: str) -> str:
         cleaned = "http" + cleaned.split("http", 1)[1]
     return cleaned
 
+def get_full_url(url: str) -> str:
+    """Resolves short links like vt.tiktok.com to full video URLs."""
+    if "tiktok.com" in url:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        try:
+            res = requests.head(url, allow_redirects=True, headers=headers, timeout=5)
+            return res.url
+        except Exception:
+            return url
+    return url
+
 
 # --- ENGINE 1: PIPED YOUTUBE FALLBACK ENGINE ---
 def extract_youtube_piped(target_url: str) -> Optional[Dict[str, Any]]:
@@ -120,6 +133,8 @@ def extract_via_ytdlp(target_url: str, proxy_url: Optional[str]) -> Dict[str, An
     local_binary = "./yt-dlp"
     if os.path.exists(local_binary):
         cmd = [local_binary, "-j", "--no-warnings", "--user-agent", user_agent,
+               "--add-header", "Accept-Language:en-US,en;q=0.9",
+               "--add-header", "Referer:https://www.tiktok.com/",
                "--extractor-args", "youtube:player_client=android,ios,mweb"]
         if selected_cookie:
             cmd.extend(["--cookies", selected_cookie])
@@ -138,7 +153,11 @@ def extract_via_ytdlp(target_url: str, proxy_url: Optional[str]) -> Dict[str, An
             'quiet': True,
             'no_warnings': True,
             'skip_download': True,
-            'user_agent': user_agent,
+            'http_headers': {
+                'User-Agent': user_agent,
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Referer': 'https://www.tiktok.com/',
+            },
             'extractor_args': {
                 'youtube': ['player_client=android,ios,mweb']
             }
@@ -201,6 +220,7 @@ async def extract_media(url: str = Query(...)):
         raise HTTPException(status_code=400, detail="URL parameter is required")
 
     target_url = clean_input_url(url)
+    target_url = get_full_url(target_url)
     selected_proxy = get_random_proxy()
 
     # 1. Try mobile-spoofed yt-dlp extraction (in worker thread)
