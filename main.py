@@ -35,7 +35,8 @@ def setup_cookies():
     cookies_b64 = os.getenv("YOUTUBE_COOKIES_B64")
     if cookies_b64:
         try:
-            decoded = base64.b64decode(cookies_b64).decode("utf-8")
+            # Added .strip() to handle potential whitespace in environment variables
+            decoded = base64.b64decode(cookies_b64.strip()).decode("utf-8")
             with open(COOKIE_PATH, "w", encoding="utf-8") as f:
                 f.write(decoded)
             print("YouTube cookies loaded successfully.")
