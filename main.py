@@ -153,34 +153,34 @@ def extract_via_ytdlp(target_url: str, proxy_url: Optional[str]) -> Dict[str, An
             info = ydl.extract_info(target_url, download=False)
 
     qualities = []
-        formats = info.get('formats', [])
+    formats = info.get('formats', [])
 
-        # Sort by resolution
-        sorted_formats = sorted(formats, key=lambda x: (x.get('height') or 0), reverse=True)
+    # Sort by resolution
+    sorted_formats = sorted(formats, key=lambda x: (x.get('height') or 0), reverse=True)
 
-        seen_res = set()
-        for fmt in sorted_formats:
-            format_url = fmt.get('url')
-            if format_url:
-                res = fmt.get('format_note') or fmt.get('resolution') or 'SD'
-                if res not in seen_res:
-                    seen_res.add(res)
-                    qualities.append({
-                        'quality': res,
-                        'type': 'video' if fmt.get('vcodec') != 'none' else 'audio',
-                        'extension': fmt.get('ext', 'mp4'),
-                        'download_url': format_url,
-                        'size_bytes': fmt.get('filesize') or fmt.get('filesize_approx')
-                    })
+    seen_res = set()
+    for fmt in sorted_formats:
+        format_url = fmt.get('url')
+        if format_url:
+            res = fmt.get('format_note') or fmt.get('resolution') or 'SD'
+            if res not in seen_res:
+                seen_res.add(res)
+                qualities.append({
+                    'quality': res,
+                    'type': 'video' if fmt.get('vcodec') != 'none' else 'audio',
+                    'extension': fmt.get('ext', 'mp4'),
+                    'download_url': format_url,
+                    'size_bytes': fmt.get('filesize') or fmt.get('filesize_approx')
+                })
 
-        return {
-            "success": True,
-            "title": info.get('title'),
-            "thumbnail": info.get('thumbnail'),
-            "duration": info.get('duration'),
-            "platform": info.get('extractor'),
-            "qualities": qualities
-        }
+    return {
+        "success": True,
+        "title": info.get('title'),
+        "thumbnail": info.get('thumbnail'),
+        "duration": info.get('duration'),
+        "platform": info.get('extractor'),
+        "qualities": qualities
+    }
 
 
 # --- API ENDPOINTS ---
