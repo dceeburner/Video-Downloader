@@ -54,7 +54,7 @@ def extract_youtube_piped(target_url: str) -> Optional[Dict[str, Any]]:
     ]
 
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Mobile Safari/537.36"
     }
 
     for instance in piped_instances:
@@ -107,25 +107,28 @@ def extract_youtube_piped(target_url: str) -> Optional[Dict[str, Any]]:
 # --- ENGINE 2: YT-DLP ENGINE WITH MOBILE CLIENT SPOOFING ---
 def extract_via_ytdlp(target_url: str, proxy_url: Optional[str]) -> Dict[str, Any]:
     """Robust yt-dlp extractor with mobile client spoofing to bypass YouTube botguard."""
+    cookie_path = "/tmp/youtube_cookies.txt"
+
     ydl_opts = {
         'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
         'quiet': True,
         'no_warnings': True,
         'skip_download': True,
         'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Mobile Safari/537.36',
         },
         # Force yt-dlp to use mobile app APIs to bypass YouTube BotGuard checks
         'extractor_args': {
-            'youtube': {
-                'player_client': ['android', 'ios', 'mweb']
-            }
+            'youtube': ['player_client=android,ios,mweb']
         }
     }
 
     if proxy_url:
         ydl_opts['proxy'] = proxy_url
         ydl_opts['geo_verification_proxy'] = proxy_url
+
+    if os.path.exists(cookie_path):
+        ydl_opts['cookiefile'] = cookie_path
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(target_url, download=False)
@@ -205,7 +208,7 @@ async def proxy_stream(stream_url: str = Query(...)):
     selected_proxy = get_random_proxy()
     proxies_dict = {"http": selected_proxy, "https": selected_proxy} if selected_proxy else None
 
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+    headers = {'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Mobile Safari/537.36'}
 
     def iter_file():
         with requests.get(stream_url, headers=headers, proxies=proxies_dict, stream=True) as r:
