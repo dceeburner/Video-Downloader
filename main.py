@@ -48,9 +48,11 @@ def extract_youtube_piped(target_url: str) -> Optional[Dict[str, Any]]:
     video_id = match.group(1)
     piped_instances = [
         "https://pipedapi.kavin.rocks",
-        "https://api.piped.privacydev.net",
-        "https://pipedapi.palvelu.org",
-        "https://pipedapi.adminforge.de"
+        "https://pipedapi.adminforge.de",
+        "https://pipedapi.tokhmi.xyz",
+        "https://pipedapi.moomoo.me",
+        "https://pipedapi.leptons.xyz",
+        "https://piped-api.privacy.com.de"
     ]
 
     headers = {
@@ -107,7 +109,8 @@ def extract_youtube_piped(target_url: str) -> Optional[Dict[str, Any]]:
 # --- ENGINE 2: YT-DLP ENGINE WITH MOBILE CLIENT SPOOFING ---
 def extract_via_ytdlp(target_url: str, proxy_url: Optional[str]) -> Dict[str, Any]:
     """Robust yt-dlp extractor with mobile client spoofing to bypass YouTube botguard."""
-    cookie_path = "/tmp/youtube_cookies.txt"
+    # Support both temp uploads and Render Secrets paths
+    cookie_paths = ["/tmp/youtube_cookies.txt", "/etc/secrets/cookies.txt", "youtube_cookies.txt"]
 
     ydl_opts = {
         'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
@@ -117,9 +120,9 @@ def extract_via_ytdlp(target_url: str, proxy_url: Optional[str]) -> Dict[str, An
         'http_headers': {
             'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Mobile Safari/537.36',
         },
-        # Force yt-dlp to use mobile app APIs to bypass YouTube BotGuard checks
+        # Use mobile clients specifically as suggested to bypass datacenter blocks
         'extractor_args': {
-            'youtube': ['player_client=android,ios,mweb']
+            'youtube': ['player_client=android,ios,web,mweb']
         }
     }
 
@@ -127,8 +130,10 @@ def extract_via_ytdlp(target_url: str, proxy_url: Optional[str]) -> Dict[str, An
         ydl_opts['proxy'] = proxy_url
         ydl_opts['geo_verification_proxy'] = proxy_url
 
-    if os.path.exists(cookie_path):
-        ydl_opts['cookiefile'] = cookie_path
+    for path in cookie_paths:
+        if os.path.exists(path):
+            ydl_opts['cookiefile'] = path
+            break
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(target_url, download=False)
