@@ -6,6 +6,7 @@ import yt_dlp
 import asyncio
 import subprocess
 import json
+import base64
 from typing import Optional, List, Dict, Any
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import StreamingResponse
@@ -26,6 +27,24 @@ app.add_middleware(
 RAW_PROXIES = os.getenv("PROXY_LIST", "")
 PROXY_POOL = [p.strip() for p in RAW_PROXIES.split(",") if p.strip()]
 
+# Path to temporary cookies file
+COOKIE_PATH = "/tmp/youtube_cookies.txt"
+
+# Decode cookies from Render Environment Variable if present
+def setup_cookies():
+    cookies_b64 = os.getenv("YOUTUBE_COOKIES_B64")
+    if cookies_b64:
+        try:
+            decoded = base64.b64decode(cookies_b64).decode("utf-8")
+            with open(COOKIE_PATH, "w", encoding="utf-8") as f:
+                f.write(decoded)
+            print("YouTube cookies loaded successfully.")
+        except Exception as e:
+            print(f"Failed to load cookies: {e}")
+
+# Run setup at startup
+setup_cookies()
+
 def get_random_proxy() -> Optional[str]:
     """Selects a random Webshare proxy from the pool."""
     if not PROXY_POOL:
@@ -40,8 +59,8 @@ def clean_input_url(url: str) -> str:
     return cleaned
 
 def get_full_url(url: str) -> str:
-    """Resolves short links like vt.tiktok.com to full video URLs."""
-    if "tiktok.com" in url:
+    """Resolves short links like vt.tiktok.com or youtu.be to full URLs."""
+    if "tiktok.com" in url or "youtu.be" in url:
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         }
@@ -124,7 +143,8 @@ def extract_youtube_piped(target_url: str) -> Optional[Dict[str, Any]]:
 # --- ENGINE 2: YT-DLP ENGINE WITH MOBILE CLIENT SPOOFING ---
 def extract_via_ytdlp(target_url: str, proxy_url: Optional[str]) -> Dict[str, Any]:
     """Robust yt-dlp extractor with mobile client spoofing and local binary support."""
-    cookie_paths = ["/tmp/youtube_cookies.txt", "/etc/secrets/cookies.txt", "youtube_cookies.txt"]
+    # Check multiple cookie locations
+    cookie_paths = [COOKIE_PATH, "/etc/secrets/cookies.txt", "youtube_cookies.txt"]
     selected_cookie = next((path for path in cookie_paths if os.path.exists(path)), None)
 
     user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -159,7 +179,9 @@ def extract_via_ytdlp(target_url: str, proxy_url: Optional[str]) -> Dict[str, An
                 'Referer': 'https://www.tiktok.com/',
             },
             'extractor_args': {
-                'youtube': ['player_client=android,ios,mweb']
+                'youtube': {
+                    'player_client': ['android', 'ios', 'mweb']
+                }
             }
         }
         if proxy_url:
