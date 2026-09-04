@@ -4,6 +4,8 @@ import re
 import requests
 import yt_dlp
 import asyncio
+import subprocess
+import json
 from typing import Optional, List, Dict, Any
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import StreamingResponse
@@ -56,7 +58,7 @@ def extract_youtube_piped(target_url: str) -> Optional[Dict[str, Any]]:
     ]
 
     headers = {
-        "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Mobile Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
 
     for instance in piped_instances:
@@ -108,36 +110,49 @@ def extract_youtube_piped(target_url: str) -> Optional[Dict[str, Any]]:
 
 # --- ENGINE 2: YT-DLP ENGINE WITH MOBILE CLIENT SPOOFING ---
 def extract_via_ytdlp(target_url: str, proxy_url: Optional[str]) -> Dict[str, Any]:
-    """Robust yt-dlp extractor with mobile client spoofing to bypass YouTube botguard."""
-    # Support both temp uploads and Render Secrets paths
+    """Robust yt-dlp extractor with mobile client spoofing and local binary support."""
     cookie_paths = ["/tmp/youtube_cookies.txt", "/etc/secrets/cookies.txt", "youtube_cookies.txt"]
+    selected_cookie = next((path for path in cookie_paths if os.path.exists(path)), None)
 
-    ydl_opts = {
-        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-        'quiet': True,
-        'no_warnings': True,
-        'skip_download': True,
-        'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Mobile Safari/537.36',
-        },
-        # Use mobile clients specifically as suggested to bypass datacenter blocks
-        'extractor_args': {
-            'youtube': ['player_client=android,ios,web,mweb']
+    user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
+    # Check for local binary as requested to bypass datacenter blocks
+    local_binary = "./yt-dlp"
+    if os.path.exists(local_binary):
+        cmd = [local_binary, "-j", "--no-warnings", "--user-agent", user_agent,
+               "--extractor-args", "youtube:player_client=android,ios,mweb"]
+        if selected_cookie:
+            cmd.extend(["--cookies", selected_cookie])
+        if proxy_url:
+            cmd.extend(["--proxy", proxy_url])
+        cmd.append(target_url)
+
+        process = subprocess.run(cmd, capture_output=True, text=True)
+        if process.returncode != 0:
+            raise Exception(f"Local binary extraction failed: {process.stderr}")
+        info = json.loads(process.stdout)
+    else:
+        # Fallback to library engine
+        ydl_opts = {
+            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+            'quiet': True,
+            'no_warnings': True,
+            'skip_download': True,
+            'user_agent': user_agent,
+            'extractor_args': {
+                'youtube': ['player_client=android,ios,mweb']
+            }
         }
-    }
+        if proxy_url:
+            ydl_opts['proxy'] = proxy_url
+            ydl_opts['geo_verification_proxy'] = proxy_url
+        if selected_cookie:
+            ydl_opts['cookiefile'] = selected_cookie
 
-    if proxy_url:
-        ydl_opts['proxy'] = proxy_url
-        ydl_opts['geo_verification_proxy'] = proxy_url
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(target_url, download=False)
 
-    for path in cookie_paths:
-        if os.path.exists(path):
-            ydl_opts['cookiefile'] = path
-            break
-
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(target_url, download=False)
-        qualities = []
+    qualities = []
         formats = info.get('formats', [])
 
         # Sort by resolution
@@ -213,7 +228,7 @@ async def proxy_stream(stream_url: str = Query(...)):
     selected_proxy = get_random_proxy()
     proxies_dict = {"http": selected_proxy, "https": selected_proxy} if selected_proxy else None
 
-    headers = {'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Mobile Safari/537.36'}
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
 
     def iter_file():
         with requests.get(stream_url, headers=headers, proxies=proxies_dict, stream=True) as r:
